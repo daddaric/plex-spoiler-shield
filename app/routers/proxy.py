@@ -11,11 +11,20 @@ from app.services.metadata import (
     obscure_episode_json,
     obscure_episode_xml,
 )
+from app.config import settings
 from app.services.watch_state import is_watched_batch
 
 logger = logging.getLogger("plex-spoiler-shield.proxy")
 
 router = APIRouter(tags=["proxy"])
+
+
+def _rewrite_location(location: str, proxy_base: str) -> str:
+    """Rewrite upstream Location headers to point back through the proxy."""
+    plex_url = settings.plex_url.rstrip("/")
+    if location.startswith(plex_url):
+        return proxy_base + location[len(plex_url):]
+    return location
 
 
 @router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
@@ -56,6 +65,14 @@ async def proxy_request(request: Request, path: str):
     response_headers = dict(upstream_resp.headers)
     for h in ("transfer-encoding", "content-encoding", "content-length"):
         response_headers.pop(h, None)
+
+    # Rewrite Location headers so redirects stay on the proxy
+    if "location" in response_headers:
+        scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+        proxy_base = f"{scheme}://{request.headers['host']}"
+        response_headers["location"] = _rewrite_location(
+            response_headers["location"], proxy_base
+        )
 
     return Response(
         content=content,

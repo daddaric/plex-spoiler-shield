@@ -20,6 +20,7 @@ title_template = app_config.title_template
 EPISODE_ROUTE_PATTERNS = [
     re.compile(r"^/library/metadata/\d+$"),
     re.compile(r"^/library/metadata/\d+/children$"),
+    re.compile(r"^/library/metadata/\d+/allLeaves$"),
     re.compile(r"^/library/sections/\d+/all"),
     re.compile(r"^/library/sections/\d+/recentlyAdded"),
     re.compile(r"^/library/sections/\d+/onDeck"),

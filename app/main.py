@@ -53,10 +53,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(webhook.router)
-app.include_router(proxy.router)  # catch-all, must be last
-
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "0.1.0"}
+
+
+app.include_router(webhook.router)
+app.include_router(proxy.router)  # catch-all, must be last
