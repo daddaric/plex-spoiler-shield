@@ -1,0 +1,19 @@
+services:
+  plex-spoiler-shield:
+    build: .
+    container_name: plex-spoiler-shield
+    ports:
+      - "32401:32401"
+    env_file:
+      - .env
+    volumes:
+      - watch-state:/data
+      - ./config.yml:/app/config.yml:ro
+      # Uncomment to enable HTTPS:
+      # - ./certs:/certs:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  watch-state:

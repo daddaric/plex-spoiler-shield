@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plex-spoiler-shield
+  labels:
+    app: plex-spoiler-shield
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: plex-spoiler-shield
+  template:
+    metadata:
+      labels:
+        app: plex-spoiler-shield
+    spec:
+      containers:
+        - name: plex-spoiler-shield
+          image: plex-spoiler-shield:latest
+          ports:
+            - containerPort: 32401
+          envFrom:
+            - secretRef:
+                name: plex-spoiler-shield-secret
+            - configMapRef:
+                name: plex-spoiler-shield-config
+          volumeMounts:
+            - name: watch-state
+              mountPath: /data
+            - name: config
+              mountPath: /app/config.yml
+              subPath: config.yml
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 32401
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 32401
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: watch-state
+          persistentVolumeClaim:
+            claimName: plex-spoiler-shield-data
+        - name: config
+          configMap:
+            name: plex-spoiler-shield-app-config
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: plex-spoiler-shield-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: plex-spoiler-shield
+spec:
+  type: ClusterIP
+  selector:
+    app: plex-spoiler-shield
+  ports:
+    - port: 32401
+      targetPort: 32401
+      protocol: TCP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: plex-spoiler-shield-config
+data:
+  PLEX_URL: "http://plex-server:32400"  # Adjust to your Plex service name
+  PROXY_PORT: "32401"
+  DB_PATH: "/data/watch_state.db"
+  POLL_INTERVAL: "600"
+  LOG_LEVEL: "info"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: plex-spoiler-shield-secret
+type: Opaque
+stringData:
+  PLEX_TOKEN: "your-plex-token-here"  # Replace with your actual token

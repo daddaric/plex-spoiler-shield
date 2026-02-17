@@ -1,0 +1,22 @@
+# Plex Spoiler Shield configuration
+# Env vars override these values (PLEX_URL, PLEX_TOKEN, etc.)
+
+# Which TV libraries to protect (by name). Empty list = protect ALL TV libraries.
+protected_libraries: []
+# Examples:
+#   - "TV Shows"
+#   - "Anime"
+
+# What to obscure on unwatched episodes
+obfuscation:
+  # Replace episode title with "Episode N"
+  title: true
+  # Blank out the episode summary/description
+  summary: true
+  # Swap episode thumbnail with series poster
+  thumbnail: true
+  # Remove guest star / role credits
+  roles: true
+
+# Replacement text pattern for episode titles ({n} = episode number)
+title_template: "Episode {n}"
