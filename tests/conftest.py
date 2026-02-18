@@ -15,6 +15,7 @@ _patches = [
     patch("app.config.settings.db_path", _test_db_path),
     patch("app.database.DB_PATH", _test_db_path),
     patch("app.services.watch_state.DB_PATH", _test_db_path),
+    patch("app.services.snapshot.DB_PATH", _test_db_path),
 ]
 
 for p in _patches:
@@ -31,4 +32,5 @@ async def reset_db():
     # Clear data between tests instead of deleting file (avoids Windows locking issues)
     async with aiosqlite.connect(_test_db_path) as db:
         await db.execute("DELETE FROM watch_state")
+        await db.execute("DELETE FROM metadata_snapshot")
         await db.commit()

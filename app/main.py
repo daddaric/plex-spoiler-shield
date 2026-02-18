@@ -3,11 +3,11 @@ import logging
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI
 
-from app.config import settings
+from app.config import app_config, settings
 from app.database import init_db
-from app.routers import proxy, webhook
+from app.routers import restore, webhook
 from app.services.sync import initial_sync, poll_loop
 
 logging.basicConfig(
@@ -23,11 +23,17 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database ready.")
 
+    if app_config.obfuscation.roles:
+        logger.warning(
+            "obfuscation.roles is enabled in config but not supported in direct metadata "
+            "modification mode — guest stars/roles cannot be modified via the Plex REST API"
+        )
+
     app.state.http_client = httpx.AsyncClient(
         base_url=settings.plex_url,
         timeout=30.0,
     )
-    logger.info(f"Proxy targeting Plex at {settings.plex_url}")
+    logger.info(f"Plex Spoiler Shield targeting Plex at {settings.plex_url}")
 
     # Run initial full-library sync
     await initial_sync(app.state.http_client)
@@ -49,15 +55,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Plex Spoiler Shield",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": "0.2.0"}
 
 
 app.include_router(webhook.router)
-app.include_router(proxy.router)  # catch-all, must be last
+app.include_router(restore.router)

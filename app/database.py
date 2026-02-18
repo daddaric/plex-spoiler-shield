@@ -15,6 +15,22 @@ async def init_db():
                 watched_at TEXT
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS metadata_snapshot (
+                rating_key TEXT PRIMARY KEY,
+                section_key TEXT NOT NULL,
+                original_title TEXT,
+                original_summary TEXT,
+                original_tagline TEXT,
+                original_thumb TEXT,
+                episode_index INTEGER,
+                parent_thumb TEXT,
+                grandparent_thumb TEXT,
+                obscured INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
         await db.commit()
 
 

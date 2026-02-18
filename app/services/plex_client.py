@@ -54,9 +54,18 @@ async def get_all_episodes(client: httpx.AsyncClient, section_key: str) -> list[
             continue
 
         view_count = int(video.get("viewCount", "0"))
+        index_str = video.get("index")
         episodes.append({
             "rating_key": rating_key,
+            "section_key": section_key,
             "watched": view_count > 0,
+            "title": video.get("title"),
+            "summary": video.get("summary"),
+            "tagline": video.get("tagline"),
+            "thumb": video.get("thumb"),
+            "episode_index": int(index_str) if index_str else None,
+            "parent_thumb": video.get("parentThumb"),
+            "grandparent_thumb": video.get("grandparentThumb"),
         })
 
     return episodes

@@ -1,33 +1,29 @@
+"""Tests for the webhook router."""
+
 import json
 
 import httpx
 import pytest
 import respx
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response as HttpxResponse
+from fastapi import FastAPI
 
+from app.routers import restore, webhook
+from app.services.snapshot import get_snapshot, mark_obscured, save_snapshots_batch
 from app.services.watch_state import is_watched
+
+PLEX_BASE = "http://plex:32400"
 
 
 def _create_test_app():
     """Create a fresh app without the sync lifespan."""
-    from contextlib import asynccontextmanager
-    from fastapi import FastAPI
-    from app.database import init_db
-    from app.routers import proxy, webhook
-
-    @asynccontextmanager
-    async def test_lifespan(app: FastAPI):
-        await init_db()
-        app.state.http_client = httpx.AsyncClient(
-            base_url="http://host.docker.internal:32400",
-            timeout=30.0,
-        )
-        yield
-        await app.state.http_client.aclose()
-
-    test_app = FastAPI(lifespan=test_lifespan)
+    test_app = FastAPI()
     test_app.include_router(webhook.router)
-    test_app.include_router(proxy.router)
+    test_app.include_router(restore.router)
+    test_app.state.http_client = httpx.AsyncClient(
+        base_url=PLEX_BASE,
+        timeout=5.0,
+    )
     return test_app
 
 
@@ -58,6 +54,79 @@ async def test_scrobble_marks_episode_watched():
         assert resp.status_code == 200
         assert resp.json()["status"] == "received"
         assert await is_watched("101") is True
+
+
+@pytest.mark.asyncio
+async def test_scrobble_restores_obscured_episode():
+    """When a scrobble fires for an obscured episode, it gets restored."""
+    await save_snapshots_batch([{
+        "rating_key": "101",
+        "section_key": "1",
+        "title": "The One Where Ross Finds Out",
+        "summary": "Ross discovers Rachel's feelings.",
+        "tagline": "",
+        "thumb": "/library/metadata/101/thumb",
+        "episode_index": 5,
+        "parent_thumb": "/library/metadata/50/thumb",
+        "grandparent_thumb": "/library/metadata/10/thumb",
+    }])
+    await mark_obscured("101")
+
+    test_app = _create_test_app()
+
+    with respx.mock:
+        respx.put(f"{PLEX_BASE}/library/sections/1/all").mock(
+            return_value=HttpxResponse(200)
+        )
+        respx.put(f"{PLEX_BASE}/library/metadata/101/refresh").mock(
+            return_value=HttpxResponse(200)
+        )
+
+        transport = ASGITransport(app=test_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/webhook/plex",
+                data={"payload": json.dumps(_scrobble_payload("101"))},
+            )
+            assert resp.status_code == 200
+
+    snap = await get_snapshot("101")
+    assert snap.obscured is False
+
+
+@pytest.mark.asyncio
+async def test_scrobble_does_not_restore_if_not_obscured():
+    """If episode has a snapshot but is not obscured, no Plex API call is made."""
+    await save_snapshots_batch([{
+        "rating_key": "101",
+        "section_key": "1",
+        "title": "Some Title",
+        "summary": "Some summary.",
+        "tagline": "",
+        "thumb": "/library/metadata/101/thumb",
+        "episode_index": 1,
+        "parent_thumb": "/library/metadata/50/thumb",
+        "grandparent_thumb": "/library/metadata/10/thumb",
+    }])
+    # NOT marking as obscured
+
+    test_app = _create_test_app()
+
+    with respx.mock:
+        put_route = respx.put(f"{PLEX_BASE}/library/sections/1/all").mock(
+            return_value=HttpxResponse(200)
+        )
+
+        transport = ASGITransport(app=test_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/webhook/plex",
+                data={"payload": json.dumps(_scrobble_payload("101"))},
+            )
+            assert resp.status_code == 200
+
+        # No Plex API call should have been made
+        assert not put_route.called
 
 
 @pytest.mark.asyncio
