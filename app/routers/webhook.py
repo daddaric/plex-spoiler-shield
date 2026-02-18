@@ -3,6 +3,8 @@ import logging
 
 from fastapi import APIRouter, Request
 
+from app.services.plex_writer import RestoreRequest, restore_episode
+from app.services.snapshot import get_snapshot, mark_restored
 from app.services.watch_state import mark_watched
 
 logger = logging.getLogger("plex-spoiler-shield.webhook")
@@ -29,7 +31,7 @@ async def plex_webhook(request: Request):
         logger.info(f"Webhook event: {event}")
 
         if event == "media.scrobble":
-            await _handle_scrobble(payload)
+            await _handle_scrobble(payload, request.app.state.http_client)
         else:
             logger.debug(f"Ignoring event type: {event}")
 
@@ -39,8 +41,11 @@ async def plex_webhook(request: Request):
     return {"status": "received"}
 
 
-async def _handle_scrobble(payload: dict):
-    """Handle media.scrobble — an episode was fully watched."""
+async def _handle_scrobble(payload: dict, http_client):
+    """Handle media.scrobble — an episode was fully watched.
+
+    Marks the episode as watched and restores original metadata if it was obscured.
+    """
     metadata = payload.get("Metadata", {})
     media_type = metadata.get("type", "")
     rating_key = str(metadata.get("ratingKey", ""))
@@ -59,3 +64,20 @@ async def _handle_scrobble(payload: dict):
 
     await mark_watched(rating_key)
     logger.info(f"Scrobble: {title} S{season}E{episode} (ratingKey={rating_key}) marked watched")
+
+    # Restore original metadata if this episode was obscured
+    snap = await get_snapshot(rating_key)
+    if snap and snap.obscured:
+        req = RestoreRequest(
+            section_key=snap.section_key,
+            rating_key=rating_key,
+            original_title=snap.original_title,
+            original_summary=snap.original_summary,
+            original_tagline=snap.original_tagline,
+            original_thumb=snap.original_thumb,
+        )
+        if await restore_episode(http_client, req):
+            await mark_restored(rating_key)
+            logger.info(f"Restored metadata for episode {rating_key}")
+        else:
+            logger.error(f"Failed to restore metadata for episode {rating_key}")

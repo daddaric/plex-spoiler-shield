@@ -1,7 +1,6 @@
-"""End-to-end tests: full proxy flow with a mocked Plex upstream."""
+"""End-to-end tests: sync flow with mocked Plex upstream."""
 
 import json
-from xml.etree import ElementTree as ET
 
 import httpx
 import pytest
@@ -9,65 +8,12 @@ import respx
 from httpx import ASGITransport, AsyncClient, Response as HttpxResponse
 from fastapi import FastAPI
 
-from app.database import init_db
-from app.routers import proxy, webhook
+from app.routers import restore, webhook
+from app.services.snapshot import get_all_obscured, get_snapshot, save_snapshots_batch, mark_obscured
 from app.services.watch_state import mark_watched
 
 
-PLEX_XML_EPISODES = """<?xml version="1.0" encoding="UTF-8"?>
-<MediaContainer size="2">
-  <Video ratingKey="301" type="episode" index="1"
-         title="Winter Is Coming"
-         summary="Ned Stark is asked to serve as Hand of the King."
-         thumb="/library/metadata/301/thumb"
-         art="/library/metadata/301/art"
-         parentThumb="/library/metadata/50/thumb"
-         grandparentThumb="/library/metadata/10/thumb"
-         grandparentArt="/library/metadata/10/art">
-    <Role tag="Sean Bean"/>
-  </Video>
-  <Video ratingKey="302" type="episode" index="2"
-         title="The Kingsroad"
-         summary="The royal party heads north."
-         thumb="/library/metadata/302/thumb"
-         parentThumb="/library/metadata/50/thumb"
-         grandparentThumb="/library/metadata/10/thumb"
-         grandparentArt="/library/metadata/10/art">
-  </Video>
-</MediaContainer>"""
-
-PLEX_JSON_EPISODES = {
-    "MediaContainer": {
-        "Metadata": [
-            {
-                "ratingKey": "301",
-                "type": "episode",
-                "index": 1,
-                "title": "Winter Is Coming",
-                "summary": "Ned Stark is asked to serve as Hand of the King.",
-                "thumb": "/library/metadata/301/thumb",
-                "art": "/library/metadata/301/art",
-                "parentThumb": "/library/metadata/50/thumb",
-                "grandparentThumb": "/library/metadata/10/thumb",
-                "grandparentArt": "/library/metadata/10/art",
-                "Role": [{"tag": "Sean Bean"}],
-            },
-            {
-                "ratingKey": "302",
-                "type": "episode",
-                "index": 2,
-                "title": "The Kingsroad",
-                "summary": "The royal party heads north.",
-                "thumb": "/library/metadata/302/thumb",
-                "parentThumb": "/library/metadata/50/thumb",
-                "grandparentThumb": "/library/metadata/10/thumb",
-                "grandparentArt": "/library/metadata/10/art",
-            },
-        ]
-    }
-}
-
-PLEX_BASE = "http://host.docker.internal:32400"
+PLEX_BASE = "http://plex:32400"
 
 
 def _create_test_app():
@@ -76,17 +22,32 @@ def _create_test_app():
 
     @test_app.get("/health")
     async def health():
-        return {"status": "ok", "version": "0.1.0"}
+        return {"status": "ok", "version": "0.2.0"}
 
     test_app.include_router(webhook.router)
-    test_app.include_router(proxy.router)
+    test_app.include_router(restore.router)
 
-    # Set the http_client on state directly
     test_app.state.http_client = httpx.AsyncClient(
         base_url=PLEX_BASE,
-        timeout=30.0,
+        timeout=5.0,
     )
     return test_app
+
+
+def _make_snapshot(rating_key="101", **overrides):
+    base = {
+        "rating_key": rating_key,
+        "section_key": "1",
+        "title": "Winter Is Coming",
+        "summary": "Ned Stark is asked to serve.",
+        "tagline": "",
+        "thumb": f"/library/metadata/{rating_key}/thumb",
+        "episode_index": 1,
+        "parent_thumb": "/library/metadata/50/thumb",
+        "grandparent_thumb": "/library/metadata/10/thumb",
+    }
+    base.update(overrides)
+    return base
 
 
 @pytest.mark.asyncio
@@ -100,129 +61,24 @@ async def test_health_endpoint():
 
 
 @pytest.mark.asyncio
-async def test_proxy_passthrough_non_episode_route():
-    """Non-episode routes are forwarded unchanged."""
+async def test_webhook_scrobble_restores_obscured_episode():
+    """Full flow: episode is obscured, webhook fires, metadata is restored."""
+    # Set up: snapshot exists and is marked obscured
+    await save_snapshots_batch([_make_snapshot("301")])
+    await mark_obscured("301")
+
     test_app = _create_test_app()
 
     with respx.mock:
-        respx.get(f"{PLEX_BASE}/identity").mock(
-            return_value=HttpxResponse(200, text="<MediaContainer machineIdentifier='abc123'/>")
+        put_route = respx.put(f"{PLEX_BASE}/library/sections/1/all").mock(
+            return_value=HttpxResponse(200)
+        )
+        respx.put(f"{PLEX_BASE}/library/metadata/301/refresh").mock(
+            return_value=HttpxResponse(200)
         )
 
         transport = ASGITransport(app=test_app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.get("/identity")
-            assert resp.status_code == 200
-            assert "abc123" in resp.text
-
-
-@pytest.mark.asyncio
-async def test_proxy_obscures_unwatched_xml():
-    """Unwatched episodes in XML responses are obscured."""
-    test_app = _create_test_app()
-
-    with respx.mock:
-        respx.get(f"{PLEX_BASE}/library/metadata/100/children").mock(
-            return_value=HttpxResponse(
-                200,
-                content=PLEX_XML_EPISODES.encode(),
-                headers={"content-type": "text/xml;charset=utf-8"},
-            )
-        )
-
-        transport = ASGITransport(app=test_app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.get("/library/metadata/100/children")
-            assert resp.status_code == 200
-
-            root = ET.fromstring(resp.content)
-            episodes = [v for v in root.iter("Video") if v.get("type") == "episode"]
-
-            assert episodes[0].get("title") == "Episode 1"
-            assert episodes[0].get("summary") == ""
-            assert episodes[0].get("thumb") == "/library/metadata/50/thumb"
-            assert episodes[0].findall("Role") == []
-            assert episodes[1].get("title") == "Episode 2"
-
-
-@pytest.mark.asyncio
-async def test_proxy_reveals_watched_xml():
-    """After marking an episode watched, it passes through unmodified."""
-    test_app = _create_test_app()
-
-    with respx.mock:
-        respx.get(f"{PLEX_BASE}/library/metadata/100/children").mock(
-            return_value=HttpxResponse(
-                200,
-                content=PLEX_XML_EPISODES.encode(),
-                headers={"content-type": "text/xml;charset=utf-8"},
-            )
-        )
-
-        await mark_watched("301")
-
-        transport = ASGITransport(app=test_app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.get("/library/metadata/100/children")
-            root = ET.fromstring(resp.content)
-            episodes = [v for v in root.iter("Video") if v.get("type") == "episode"]
-
-            assert episodes[0].get("title") == "Winter Is Coming"
-            assert episodes[0].get("summary") == "Ned Stark is asked to serve as Hand of the King."
-            assert episodes[1].get("title") == "Episode 2"
-
-
-@pytest.mark.asyncio
-async def test_proxy_obscures_unwatched_json():
-    """Unwatched episodes in JSON responses are obscured."""
-    test_app = _create_test_app()
-
-    with respx.mock:
-        respx.get(f"{PLEX_BASE}/library/metadata/100/children").mock(
-            return_value=HttpxResponse(
-                200,
-                content=json.dumps(PLEX_JSON_EPISODES).encode(),
-                headers={"content-type": "application/json"},
-            )
-        )
-
-        transport = ASGITransport(app=test_app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.get("/library/metadata/100/children")
-            assert resp.status_code == 200
-
-            data = resp.json()
-            eps = data["MediaContainer"]["Metadata"]
-
-            assert eps[0]["title"] == "Episode 1"
-            assert eps[0]["summary"] == ""
-            assert eps[0]["thumb"] == "/library/metadata/50/thumb"
-            assert "Role" not in eps[0]
-            assert eps[1]["title"] == "Episode 2"
-
-
-@pytest.mark.asyncio
-async def test_proxy_reveals_after_webhook():
-    """Full flow: webhook marks episode watched, then proxy reveals it."""
-    test_app = _create_test_app()
-
-    with respx.mock:
-        respx.get(f"{PLEX_BASE}/library/metadata/100/children").mock(
-            return_value=HttpxResponse(
-                200,
-                content=json.dumps(PLEX_JSON_EPISODES).encode(),
-                headers={"content-type": "application/json"},
-            )
-        )
-
-        transport = ASGITransport(app=test_app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            # First request — both obscured
-            resp1 = await client.get("/library/metadata/100/children")
-            data1 = resp1.json()
-            assert data1["MediaContainer"]["Metadata"][0]["title"] == "Episode 1"
-
-            # Webhook fires for episode 301
             webhook_payload = {
                 "event": "media.scrobble",
                 "Metadata": {
@@ -233,32 +89,79 @@ async def test_proxy_reveals_after_webhook():
                     "index": 1,
                 },
             }
-            await client.post(
+            resp = await client.post(
                 "/webhook/plex",
                 data={"payload": json.dumps(webhook_payload)},
             )
+            assert resp.status_code == 200
 
-            # Second request — 301 revealed, 302 still obscured
-            resp2 = await client.get("/library/metadata/100/children")
-            data2 = resp2.json()
-            eps = data2["MediaContainer"]["Metadata"]
-            assert eps[0]["title"] == "Winter Is Coming"
-            assert eps[0]["summary"] == "Ned Stark is asked to serve as Hand of the King."
-            assert eps[1]["title"] == "Episode 2"
-            assert eps[1]["summary"] == ""
+        # Verify the episode is no longer obscured
+        snap = await get_snapshot("301")
+        assert snap.obscured is False
+
+        # Verify Plex API was called with restore params
+        assert put_route.called
+        url_str = str(put_route.calls[0].request.url)
+        assert "title.locked=0" in url_str
 
 
 @pytest.mark.asyncio
-async def test_proxy_handles_upstream_error():
-    """Upstream errors are forwarded to the client."""
+async def test_webhook_scrobble_no_snapshot_still_marks_watched():
+    """Webhook for an episode without a snapshot still marks it watched."""
+    test_app = _create_test_app()
+
+    transport = ASGITransport(app=test_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        webhook_payload = {
+            "event": "media.scrobble",
+            "Metadata": {
+                "type": "episode",
+                "ratingKey": "999",
+                "grandparentTitle": "Unknown",
+                "parentIndex": 1,
+                "index": 1,
+            },
+        }
+        resp = await client.post(
+            "/webhook/plex",
+            data={"payload": json.dumps(webhook_payload)},
+        )
+        assert resp.status_code == 200
+
+    from app.services.watch_state import is_watched
+    assert await is_watched("999") is True
+
+
+@pytest.mark.asyncio
+async def test_status_then_restore_all_flow():
+    """Check status, restore all, verify status is clear."""
+    await save_snapshots_batch([
+        _make_snapshot("101"),
+        _make_snapshot("102", title="The Kingsroad", episode_index=2),
+    ])
+    await mark_obscured("101")
+    await mark_obscured("102")
+
     test_app = _create_test_app()
 
     with respx.mock:
-        respx.get(f"{PLEX_BASE}/library/metadata/999").mock(
-            return_value=HttpxResponse(404, text="Not Found")
+        respx.put(f"{PLEX_BASE}/library/sections/1/all").mock(
+            return_value=HttpxResponse(200)
+        )
+        respx.put(url__regex=r".*/refresh$").mock(
+            return_value=HttpxResponse(200)
         )
 
         transport = ASGITransport(app=test_app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.get("/library/metadata/999")
-            assert resp.status_code == 404
+            # Check status - 2 obscured
+            status_resp = await client.get("/status")
+            assert status_resp.json()["obscured_count"] == 2
+
+            # Restore all
+            restore_resp = await client.post("/restore/all")
+            assert restore_resp.json()["restored"] == 2
+
+            # Check status again - 0 obscured
+            status_resp2 = await client.get("/status")
+            assert status_resp2.json()["obscured_count"] == 0
