@@ -57,11 +57,8 @@ async def obscure_episode(client: httpx.AsyncClient, req: ObscureRequest) -> boo
         params["tagline.locked"] = "1"
 
     if obf.thumbnail:
-        # Use parent (season) thumb, fall back to grandparent (show) thumb
-        replacement_thumb = req.parent_thumb or req.grandparent_thumb
-        if replacement_thumb:
-            params["thumb.value"] = replacement_thumb
-            params["thumb.locked"] = "1"
+        # Lock the thumb field to prevent library scans from overwriting
+        params["thumb.locked"] = "1"
 
     async with _semaphore:
         try:
@@ -71,6 +68,18 @@ async def obscure_episode(client: httpx.AsyncClient, req: ObscureRequest) -> boo
                 headers=_headers(),
             )
             resp.raise_for_status()
+
+            # Replace episode thumbnail via the poster endpoint
+            # (thumb.value on sections/all does not work for episodes)
+            if obf.thumbnail:
+                replacement_thumb = req.parent_thumb or req.grandparent_thumb
+                if replacement_thumb:
+                    await client.put(
+                        f"/library/metadata/{req.rating_key}/poster",
+                        params={"url": replacement_thumb},
+                        headers=_headers(),
+                    )
+
             logger.debug(f"Obscured episode {req.rating_key}")
             return True
         except Exception:
@@ -94,8 +103,8 @@ async def restore_episode(client: httpx.AsyncClient, req: RestoreRequest) -> boo
             params["tagline.value"] = req.original_tagline
             params["tagline.locked"] = "0"
 
-    if obf.thumbnail and req.original_thumb is not None:
-        params["thumb.value"] = req.original_thumb
+    if obf.thumbnail:
+        # Unlock thumb so the refresh below can restore the original poster
         params["thumb.locked"] = "0"
 
     async with _semaphore:

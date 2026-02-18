@@ -56,16 +56,26 @@ async def test_obscure_episode_sends_correct_params():
             route = respx.put(f"{PLEX_BASE}/library/sections/1/all").mock(
                 return_value=HttpxResponse(200)
             )
+            poster_route = respx.put(f"{PLEX_BASE}/library/metadata/101/poster").mock(
+                return_value=HttpxResponse(200)
+            )
 
             result = await obscure_episode(client, _obscure_req())
 
             assert result is True
             assert route.called
             request = route.calls[0].request
-            assert "title.value=Episode+1" in str(request.url) or "title.value=Episode%201" in str(request.url)
-            assert "title.locked=1" in str(request.url)
-            assert "summary.value=" in str(request.url)
-            assert "summary.locked=1" in str(request.url)
+            url_str = str(request.url)
+            assert "title.value=Episode+1" in url_str or "title.value=Episode%201" in url_str
+            assert "title.locked=1" in url_str
+            assert "summary.value=" in url_str
+            assert "summary.locked=1" in url_str
+            assert "thumb.locked=1" in url_str
+            # Poster set via separate endpoint, not thumb.value
+            assert "thumb.value=" not in url_str
+            assert poster_route.called
+            poster_url = str(poster_route.calls[0].request.url)
+            assert "url=%2Flibrary%2Fmetadata%2F50%2Fthumb" in poster_url
 
 
 @pytest.mark.asyncio
@@ -121,6 +131,9 @@ async def test_obscure_batch():
             respx.put(f"{PLEX_BASE}/library/sections/1/all").mock(
                 return_value=HttpxResponse(200)
             )
+            respx.put(url__regex=r".*/poster").mock(
+                return_value=HttpxResponse(200)
+            )
 
             reqs = [_obscure_req(rating_key="101"), _obscure_req(rating_key="102")]
             succeeded = await obscure_episodes_batch(client, reqs)
@@ -152,13 +165,18 @@ async def test_obscure_respects_title_only_config():
                 route = respx.put(f"{PLEX_BASE}/library/sections/1/all").mock(
                     return_value=HttpxResponse(200)
                 )
+                poster_route = respx.put(url__regex=r".*/poster").mock(
+                    return_value=HttpxResponse(200)
+                )
 
                 await obscure_episode(client, _obscure_req())
 
                 url_str = str(route.calls[0].request.url)
                 assert "title.value=" in url_str
                 assert "summary.value=" not in url_str
-                assert "thumb.value=" not in url_str
+                assert "thumb.locked=" not in url_str
+                # No poster call when thumbnail disabled
+                assert not poster_route.called
 
 
 @pytest.mark.asyncio
@@ -170,6 +188,9 @@ async def test_obscure_respects_all_disabled():
                 route = respx.put(f"{PLEX_BASE}/library/sections/1/all").mock(
                     return_value=HttpxResponse(200)
                 )
+                poster_route = respx.put(url__regex=r".*/poster").mock(
+                    return_value=HttpxResponse(200)
+                )
 
                 await obscure_episode(client, _obscure_req())
 
@@ -177,4 +198,5 @@ async def test_obscure_respects_all_disabled():
                 # Only type and id should be present
                 assert "title.value=" not in url_str
                 assert "summary.value=" not in url_str
-                assert "thumb.value=" not in url_str
+                assert "thumb.locked=" not in url_str
+                assert not poster_route.called
