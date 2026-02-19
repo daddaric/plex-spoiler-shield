@@ -4,6 +4,8 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import quote
+from xml.etree import ElementTree as ET
 
 import httpx
 
@@ -42,7 +44,7 @@ class RestoreRequest:
 
 
 async def obscure_episode(client: httpx.AsyncClient, req: ObscureRequest) -> bool:
-    """PUT obscured metadata to Plex for a single episode. Returns True on success."""
+    """Obscure metadata for a single episode. Returns True on success."""
     params = {"type": "4", "id": req.rating_key}
 
     if obf.title:
@@ -57,11 +59,8 @@ async def obscure_episode(client: httpx.AsyncClient, req: ObscureRequest) -> boo
         params["tagline.locked"] = "1"
 
     if obf.thumbnail:
-        # Use parent (season) thumb, fall back to grandparent (show) thumb
-        replacement_thumb = req.parent_thumb or req.grandparent_thumb
-        if replacement_thumb:
-            params["thumb.value"] = replacement_thumb
-            params["thumb.locked"] = "1"
+        # Lock the thumb field to prevent library scans from overwriting
+        params["thumb.locked"] = "1"
 
     async with _semaphore:
         try:
@@ -71,6 +70,15 @@ async def obscure_episode(client: httpx.AsyncClient, req: ObscureRequest) -> boo
                 headers=_headers(),
             )
             resp.raise_for_status()
+
+            # Replace episode thumbnail by uploading the season/show poster as a
+            # custom poster. thumb.value via sections/all is silently ignored by Plex
+            # for episodes; the correct approach is a binary POST to /posters.
+            if obf.thumbnail:
+                source_thumb = req.parent_thumb or req.grandparent_thumb
+                if source_thumb:
+                    await _upload_poster(client, req.rating_key, source_thumb)
+
             logger.debug(f"Obscured episode {req.rating_key}")
             return True
         except Exception:
@@ -79,7 +87,7 @@ async def obscure_episode(client: httpx.AsyncClient, req: ObscureRequest) -> boo
 
 
 async def restore_episode(client: httpx.AsyncClient, req: RestoreRequest) -> bool:
-    """PUT original metadata back to Plex and unlock fields. Returns True on success."""
+    """Restore original metadata for a single episode. Returns True on success."""
     params = {"type": "4", "id": req.rating_key}
 
     if obf.title and req.original_title is not None:
@@ -94,8 +102,8 @@ async def restore_episode(client: httpx.AsyncClient, req: RestoreRequest) -> boo
             params["tagline.value"] = req.original_tagline
             params["tagline.locked"] = "0"
 
-    if obf.thumbnail and req.original_thumb is not None:
-        params["thumb.value"] = req.original_thumb
+    if obf.thumbnail:
+        # Unlock so the poster reselection below and refresh can overwrite it
         params["thumb.locked"] = "0"
 
     async with _semaphore:
@@ -107,7 +115,10 @@ async def restore_episode(client: httpx.AsyncClient, req: RestoreRequest) -> boo
             )
             resp.raise_for_status()
 
-            # Trigger a metadata refresh to re-fetch from agents
+            if obf.thumbnail:
+                await _restore_original_poster(client, req.rating_key)
+
+            # Trigger metadata refresh to re-fetch from agents
             await client.put(
                 f"/library/metadata/{req.rating_key}/refresh",
                 headers=_headers(),
@@ -118,6 +129,60 @@ async def restore_episode(client: httpx.AsyncClient, req: RestoreRequest) -> boo
         except Exception:
             logger.exception(f"Failed to restore episode {req.rating_key}")
             return False
+
+
+async def _upload_poster(
+    client: httpx.AsyncClient, rating_key: str, source_thumb: str
+) -> None:
+    """Upload an image from source_thumb as a custom poster for the episode.
+
+    Fetches the image bytes from source_thumb then POSTs them to the episode's
+    /posters endpoint. Plex auto-selects the uploaded poster, and the episode's
+    thumb attribute updates to the new custom image.
+    """
+    source_resp = await client.get(source_thumb, headers=_headers())
+    if not source_resp.is_success:
+        logger.warning(f"Failed to fetch source poster from {source_thumb}: {source_resp.status_code}")
+        return
+
+    upload_resp = await client.post(
+        f"/library/metadata/{rating_key}/posters",
+        content=source_resp.content,
+        headers={**_headers(), "Content-Type": "image/jpeg"},
+    )
+    if not upload_resp.is_success:
+        logger.warning(f"Failed to upload poster for episode {rating_key}: {upload_resp.status_code}")
+
+
+async def _restore_original_poster(
+    client: httpx.AsyncClient, rating_key: str
+) -> None:
+    """Reselect the original metadata agent poster, replacing our custom upload.
+
+    Fetches the posters list, finds the first non-upload poster (from the metadata
+    agent), and selects it via PUT /poster?url={key}.
+    """
+    posters_resp = await client.get(
+        f"/library/metadata/{rating_key}/posters",
+        headers={**_headers(), "Accept": "application/xml"},
+    )
+    if not posters_resp.is_success:
+        logger.warning(f"Failed to get posters list for episode {rating_key}")
+        return
+
+    root = ET.fromstring(posters_resp.content)
+    for photo in root.iter("Photo"):
+        rk = photo.get("ratingKey", "")
+        # Skip our uploaded poster — select the first agent-provided poster
+        if not rk.startswith("upload://"):
+            await client.put(
+                f"/library/metadata/{rating_key}/poster",
+                params={"url": rk},
+                headers=_headers(),
+            )
+            return
+
+    logger.warning(f"No agent poster found for episode {rating_key} — refresh will handle it")
 
 
 async def obscure_episodes_batch(

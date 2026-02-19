@@ -12,6 +12,12 @@ from app.services.snapshot import mark_obscured, save_snapshots_batch
 
 PLEX_BASE = "http://plex:32400"
 
+POSTERS_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="2">
+  <Photo ratingKey="metadata://posters/tv.plex.agents.series_abc" provider="tmdb" selected="0"/>
+  <Photo ratingKey="upload://posters/seasons/0/episodes/1/deadbeef" provider="" selected="1"/>
+</MediaContainer>"""
+
 
 def _create_test_app():
     test_app = FastAPI()
@@ -93,6 +99,12 @@ async def test_restore_all_restores_obscured():
 
     with respx.mock:
         respx.put(f"{PLEX_BASE}/library/sections/1/all").mock(
+            return_value=HttpxResponse(200)
+        )
+        respx.get(url__regex=r".*/posters$").mock(
+            return_value=HttpxResponse(200, content=POSTERS_XML, headers={"content-type": "text/xml"})
+        )
+        respx.put(url__regex=r".*/poster(?!s)").mock(
             return_value=HttpxResponse(200)
         )
         respx.put(url__regex=r".*/refresh$").mock(
