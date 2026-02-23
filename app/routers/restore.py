@@ -4,7 +4,7 @@ import logging
 
 from fastapi import APIRouter, Request
 
-from app.services.plex_writer import RestoreRequest, restore_episode
+from app.services.plex_writer import RestoreRequest, reapply_episode_thumbnail, restore_episode
 from app.services.snapshot import get_all_obscured, mark_restored
 
 logger = logging.getLogger("plex-spoiler-shield.restore")
@@ -45,6 +45,36 @@ async def restore_all(request: Request):
         "restored": restored_count,
         "failed": failed_count,
     }
+
+
+@router.post("/reindex/thumbnails")
+async def reindex_thumbnails(request: Request):
+    """Re-upload letterboxed thumbnails for all currently obscured episodes.
+
+    Use after updating thumbnail processing logic to reprocess existing obscured content
+    with the correct aspect ratio.
+    """
+    client = request.app.state.http_client
+    obscured = await get_all_obscured()
+
+    if not obscured:
+        return {"status": "ok", "updated": 0, "skipped": 0, "failed": 0, "message": "No episodes currently obscured"}
+
+    updated = 0
+    skipped = 0
+    failed = 0
+
+    for snap in obscured:
+        if not (snap.parent_thumb or snap.grandparent_thumb):
+            skipped += 1
+            continue
+        if await reapply_episode_thumbnail(client, snap.rating_key, snap.parent_thumb, snap.grandparent_thumb):
+            updated += 1
+        else:
+            failed += 1
+
+    logger.info(f"Reindex thumbnails: updated {updated}, skipped {skipped}, failed {failed}")
+    return {"status": "ok", "updated": updated, "skipped": skipped, "failed": failed}
 
 
 @router.get("/status")
