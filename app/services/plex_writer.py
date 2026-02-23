@@ -1,6 +1,7 @@
 """Plex API write operations for modifying episode metadata."""
 
 import asyncio
+import io
 import logging
 from dataclasses import dataclass
 from typing import Optional
@@ -8,6 +9,7 @@ from urllib.parse import quote
 from xml.etree import ElementTree as ET
 
 import httpx
+from PIL import Image, ImageOps
 
 from app.config import app_config, settings
 
@@ -15,6 +17,27 @@ logger = logging.getLogger("plex-spoiler-shield.plex_writer")
 
 # Limit concurrent Plex API writes
 _semaphore = asyncio.Semaphore(5)
+
+# Episode thumbnails in Plex are 16:9 landscape
+_EPISODE_THUMB_SIZE = (1280, 720)
+
+
+def _letterbox_to_landscape(image_bytes: bytes) -> bytes:
+    """Fit image into a 16:9 landscape frame with black letterboxing.
+
+    Season/series artwork is portrait; episode thumbnails are landscape. This
+    scales the image to fill the height and adds black bars on the sides.
+    """
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img = img.convert("RGB")
+            padded = ImageOps.pad(img, _EPISODE_THUMB_SIZE, color=(0, 0, 0))
+            out = io.BytesIO()
+            padded.save(out, format="JPEG", quality=90)
+            return out.getvalue()
+    except Exception:
+        logger.warning("Failed to letterbox poster image — uploading original")
+        return image_bytes
 
 obf = app_config.obfuscation
 title_template = app_config.title_template
@@ -145,9 +168,10 @@ async def _upload_poster(
         logger.warning(f"Failed to fetch source poster from {source_thumb}: {source_resp.status_code}")
         return
 
+    image_bytes = _letterbox_to_landscape(source_resp.content)
     upload_resp = await client.post(
         f"/library/metadata/{rating_key}/posters",
-        content=source_resp.content,
+        content=image_bytes,
         headers={**_headers(), "Content-Type": "image/jpeg"},
     )
     if not upload_resp.is_success:

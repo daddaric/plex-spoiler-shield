@@ -1,11 +1,13 @@
 """Tests for Plex API write operations."""
 
+import io
 from unittest.mock import patch
 
 import httpx
 import pytest
 import respx
 from httpx import Response as HttpxResponse
+from PIL import Image
 
 from app.config import ObfuscationConfig
 from app.services.plex_writer import (
@@ -19,7 +21,15 @@ from app.services.plex_writer import (
 
 PLEX_BASE = "http://plex:32400"
 
-FAKE_POSTER_BYTES = b"\xff\xd8\xff\xe0fake-jpeg-data"
+
+def _make_jpeg(width: int = 4, height: int = 6) -> bytes:
+    """Create a minimal portrait JPEG for testing."""
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), color=(100, 100, 100)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+FAKE_POSTER_BYTES = _make_jpeg()
 
 POSTERS_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <MediaContainer size="2">
