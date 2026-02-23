@@ -1,10 +1,13 @@
 """Tests for restore and status endpoints."""
 
+import io
+
 import httpx
 import pytest
 import respx
 from httpx import ASGITransport, AsyncClient, Response as HttpxResponse
 from fastapi import FastAPI
+from PIL import Image
 
 from app.routers import restore, webhook
 from app.services.snapshot import mark_obscured, save_snapshots_batch
@@ -17,6 +20,15 @@ POSTERS_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
   <Photo ratingKey="metadata://posters/tv.plex.agents.series_abc" provider="tmdb" selected="0"/>
   <Photo ratingKey="upload://posters/seasons/0/episodes/1/deadbeef" provider="" selected="1"/>
 </MediaContainer>"""
+
+
+def _make_jpeg(width: int = 4, height: int = 6) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), color=(100, 100, 100)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+FAKE_POSTER_BYTES = _make_jpeg()
 
 
 def _create_test_app():
@@ -121,3 +133,55 @@ async def test_restore_all_restores_obscured():
             # Verify status shows none obscured
             status_resp = await client.get("/status")
             assert status_resp.json()["obscured_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reindex_thumbnails_no_obscured():
+    test_app = _create_test_app()
+    transport = ASGITransport(app=test_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/reindex/thumbnails")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["updated"] == 0
+        assert "message" in data
+
+
+@pytest.mark.asyncio
+async def test_reindex_thumbnails_updates_obscured():
+    await save_snapshots_batch([_make_snapshot("101"), _make_snapshot("102")])
+    await mark_obscured("101")
+    await mark_obscured("102")
+
+    test_app = _create_test_app()
+
+    with respx.mock:
+        respx.get(url__regex=r".*/thumb").mock(
+            return_value=HttpxResponse(200, content=FAKE_POSTER_BYTES)
+        )
+        respx.post(url__regex=r".*/posters$").mock(
+            return_value=HttpxResponse(200)
+        )
+
+        transport = ASGITransport(app=test_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/reindex/thumbnails")
+            data = resp.json()
+            assert data["updated"] == 2
+            assert data["failed"] == 0
+            assert data["skipped"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reindex_thumbnails_skips_no_thumb():
+    await save_snapshots_batch([_make_snapshot("101", parent_thumb=None, grandparent_thumb=None)])
+    await mark_obscured("101")
+
+    test_app = _create_test_app()
+    transport = ASGITransport(app=test_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/reindex/thumbnails")
+        data = resp.json()
+        assert data["updated"] == 0
+        assert data["skipped"] == 1
+        assert data["failed"] == 0

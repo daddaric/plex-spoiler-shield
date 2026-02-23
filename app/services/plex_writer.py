@@ -209,6 +209,29 @@ async def _restore_original_poster(
     logger.warning(f"No agent poster found for episode {rating_key} — refresh will handle it")
 
 
+async def reapply_episode_thumbnail(
+    client: httpx.AsyncClient,
+    rating_key: str,
+    parent_thumb: Optional[str],
+    grandparent_thumb: Optional[str],
+) -> bool:
+    """Re-upload the letterboxed placeholder thumbnail for an already-obscured episode.
+
+    Use after updating thumbnail processing logic to reprocess existing obscured content.
+    Returns True on success, False if no source thumbnail is available or upload fails.
+    """
+    source_thumb = parent_thumb or grandparent_thumb
+    if not source_thumb:
+        return False
+    async with _semaphore:
+        try:
+            await _upload_poster(client, rating_key, source_thumb)
+            return True
+        except Exception:
+            logger.exception(f"Failed to reapply thumbnail for episode {rating_key}")
+            return False
+
+
 async def obscure_episodes_batch(
     client: httpx.AsyncClient, episodes: list[ObscureRequest]
 ) -> list[str]:
